@@ -19,9 +19,10 @@ dependencyResolutionManagement {
   repositories {
     google()
     mavenCentral()
+    maven { url = java.net.URI.create("https://jitpack.io") }
   }
 }
 
-rootProject.name = "My Application"
+rootProject.name = "Maya ai"
 
 include(":app")

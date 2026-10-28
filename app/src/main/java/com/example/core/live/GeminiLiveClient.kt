@@ -268,6 +268,7 @@ class GeminiLiveClient(
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS) // Keep alive indefinitely
                 .writeTimeout(15, TimeUnit.SECONDS)
+                .pingInterval(20, TimeUnit.SECONDS)
                 .build()
         }
 
@@ -475,14 +476,8 @@ class GeminiLiveClient(
                 preferences?.markKeyStatus(currentApiKey, "WORKING")
             }
 
-            // Send initial friendly greeting only once on the first connect of a call
-            if (greetOnConnect && !hasDoneInitialGreeting) {
+            if (!hasDoneInitialGreeting) {
                 hasDoneInitialGreeting = true
-                scope?.launch {
-                    delay(300L)
-                    val owner = preferences?.ownerName?.first()?.ifBlank { "Boss" } ?: "Boss"
-                    sendTextMessage("(Aura session connected. Greet $owner warmly in Hinglish with one short sentence, e.g. 'Haan $owner, bolo kya help chahiye?')")
-                }
             }
             return
         }

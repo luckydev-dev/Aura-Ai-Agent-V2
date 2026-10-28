@@ -92,6 +92,10 @@ class MemoryRepository(context: Context) {
         )
     }
 
+    suspend fun updateFact(id: Long, key: String, value: String, category: String = "fact") {
+        userFactDao.updateById(id, key.trim(), value.trim(), category.trim())
+    }
+
     suspend fun findFact(key: String): String? {
         return userFactDao.findByKey(key.trim())?.value
     }

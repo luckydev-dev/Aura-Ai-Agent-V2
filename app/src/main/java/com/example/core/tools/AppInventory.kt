@@ -329,14 +329,18 @@ class AppInventory(
         if (match is AppMatchResult.Found) {
             val launchIntent = pm.getLaunchIntentForPackage(match.app.packageName)
             if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 context.startActivity(launchIntent)
+                delay(600)
                 return true
             }
         }
 
         val targetPkg = if (match is AppMatchResult.Found) match.app.packageName else trimmed
         val res = rootManager.execute("monkey -p $targetPkg -c android.intent.category.LAUNCHER 1")
+        if (res.success) {
+            delay(600)
+        }
         return res.success
     }
 

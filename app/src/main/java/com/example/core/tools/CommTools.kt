@@ -520,10 +520,37 @@ class CommTools(
         }
     }
 
+    val configureMessageAutoReplyTool = object : Tool {
+        override val name = "configure_message_auto_reply"
+        override val description = "Configures automatic replies to incoming chat messages (WhatsApp, Telegram, SMS) when the owner is busy or unavailable. Do NOT confuse this with phone call rejection."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "enabled" to mapOf("type" to "boolean", "description" to "true to auto-reply to incoming chat messages, false to disable."),
+                "message" to mapOf("type" to "string", "description" to "The reply message to send to incoming chat messages (e.g. 'Mai abhi busy hu, baad me text karta hu').")
+            ),
+            "required" to listOf("enabled")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val enabled = args["enabled"] as? Boolean ?: return ToolExecutionResult(false, "Missing 'enabled' parameter")
+            val msg = args["message"]?.toString() ?: "Mai abhi busy hu, baad me text karta hu."
+            preferences.setNotifAutoReplyBusy(enabled, msg)
+            if (enabled) {
+                preferences.setNotifAnnounceEnabled(true)
+            }
+            return ToolExecutionResult(
+                true,
+                if (enabled) "Message auto-reply enabled: '$msg'" else "Message auto-reply disabled"
+            )
+        }
+    }
+
     fun getAllTools(): List<Tool> = listOf(
         sendWhatsappTool, sendSmsTool, makeCallTool, answerCallTool, rejectCallTool,
         rejectCallWithMessageTool, silenceRingerTool, endCallTool,
         readSmsTool, readCallLogTool, readNotificationsTool, replyToNotificationTool,
-        dismissNotificationTool, searchContactsTool, configureCallAutoRejectTool
+        dismissNotificationTool, searchContactsTool, configureCallAutoRejectTool,
+        configureMessageAutoReplyTool
     )
 }

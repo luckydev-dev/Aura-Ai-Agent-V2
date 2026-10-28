@@ -9,8 +9,10 @@ import android.database.Cursor
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.provider.CallLog
 import android.provider.ContactsContract
 import android.telecom.TelecomManager
+import com.example.service.AuraAccessibilityService
 import android.telephony.PhoneStateListener
 import android.telephony.SmsManager
 import android.telephony.TelephonyCallback
@@ -109,11 +111,13 @@ class CallAnnouncementManager(
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 if (isRinging) {
                     isRinging = false
+                    restoreRingerVolume()
                     releaseMicrophoneForCall()
                 }
             }
             TelephonyManager.CALL_STATE_IDLE -> {
                 isRinging = false
+                restoreRingerVolume()
                 activeCallerName = null
                 activeCallerNumber = null
             }
@@ -160,37 +164,117 @@ class CallAnnouncementManager(
             cleanMsg = cleanMsg.removeSuffix("/?").removeSuffix("/").trim()
         }
 
-        val sendSms = preferences.callAutoReplySms.first()
-        val sendWa = preferences.callAutoReplyWhatsapp.first()
-
-        var smsSent = false
-        var waSent = false
-
-        if (sendSms && number.isNotBlank()) {
-            try {
-                val sms = SmsManager.getDefault()
-                val parts = sms.divideMessage(cleanMsg)
-                sms.sendMultipartTextMessage(number, null, parts, null, null)
-                smsSent = true
-            } catch (e: Exception) {
-                val res = rootManager.execute("service call isms 7 i32 0 s16 \"com.android.mms\" s16 \"$number\" s16 \"null\" s16 \"$cleanMsg\"")
-                smsSent = res.success
-            }
+        // Active resolution of incoming phone number if not provided by Telephony listener
+        var targetNumber = number.trim()
+        if (targetNumber.isBlank()) {
+            targetNumber = getLatestIncomingNumber() ?: ""
+        }
+        if (targetNumber.isBlank() && caller.isNotBlank() && !caller.equals("Caller", ignoreCase = true) && !caller.equals("Unknown Caller", ignoreCase = true)) {
+            targetNumber = resolveNumberForName(caller) ?: ""
         }
 
-        if (sendWa) {
-            val waTarget = if (number.isNotBlank()) number else caller
-            sendWhatsappDirect(waTarget, cleanMsg)
+        var waSent = false
+        var smsSent = false
+
+        // User preference & decision: Check WhatsApp contact first, then fallback to SMS
+        val hasWhatsapp = if (targetNumber.isNotBlank()) isNumberOnWhatsapp(targetNumber) else false
+
+        if (hasWhatsapp && targetNumber.isNotBlank()) {
+            waSent = sendWhatsappDirect(targetNumber, cleanMsg)
+        }
+
+        // If not on WhatsApp or WhatsApp delivery failed, fallback to normal SMS
+        if (!waSent && targetNumber.isNotBlank()) {
+            smsSent = sendSmsDirect(targetNumber, cleanMsg)
+        } else if (!waSent && isVoip) {
+            // For VoIP calls (WhatsApp / Telegram call notification), reply directly via notification action
+            AuraNotificationListener.replyToNotification(caller, cleanMsg)
             waSent = true
         }
 
         AuraForegroundService.currentService?.let { service ->
-            service.liveClient.sendTextMessage("[SYSTEM EVENT: Auto-rejected call from $caller. Busy message sent (SMS=$smsSent, WhatsApp=$waSent): \"$cleanMsg\"]")
+            service.liveClient.sendTextMessage("[SYSTEM EVENT: Auto-rejected call from $caller. Busy message sent (WhatsApp=$waSent, SMS=$smsSent, Target=$targetNumber): \"$cleanMsg\"]")
         }
     }
 
-    private suspend fun sendWhatsappDirect(target: String, message: String) {
+    private fun isNumberOnWhatsapp(phoneNumber: String): Boolean {
+        val digits = phoneNumber.replace(Regex("""[^\d]"""), "")
+        if (digits.isBlank()) return false
+        val last10 = if (digits.length >= 10) digits.takeLast(10) else digits
+        return try {
+            val cursor = context.contentResolver.query(
+                ContactsContract.Data.CONTENT_URI,
+                arrayOf(ContactsContract.Data.DATA1),
+                "${ContactsContract.Data.MIMETYPE} = ? AND (${ContactsContract.Data.DATA1} LIKE ? OR ${ContactsContract.Data.DATA3} LIKE ?)",
+                arrayOf("vnd.android.cursor.item/vnd.com.whatsapp.profile", "%$last10%", "%$last10%"),
+                null
+            )
+            cursor?.use {
+                it.count > 0
+            } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "WhatsApp contact lookup error: ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun getLatestIncomingNumber(): String? {
         try {
+            if (context.checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
+                val cursor = context.contentResolver.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.TYPE),
+                    "${CallLog.Calls.TYPE} = ? OR ${CallLog.Calls.TYPE} = ?",
+                    arrayOf(CallLog.Calls.INCOMING_TYPE.toString(), CallLog.Calls.MISSED_TYPE.toString()),
+                    "${CallLog.Calls.DATE} DESC"
+                )
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val num = it.getString(it.getColumnIndexOrThrow(CallLog.Calls.NUMBER))
+                        val date = it.getLong(it.getColumnIndexOrThrow(CallLog.Calls.DATE))
+                        if (System.currentTimeMillis() - date < 45_000) {
+                            return num
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Privileged root fallback via dumpsys
+        try {
+            val res = rootManager.execute("dumpsys telephony.registry | grep -i 'mCallIncomingNumber\\|incomingNumber'")
+            val match = Regex("""incomingNumber=([+0-9]+)""").find(res.stdout) ?: Regex("""mCallIncomingNumber=([+0-9]+)""").find(res.stdout)
+            if (match != null) {
+                return match.groupValues[1]
+            }
+        } catch (_: Exception) {}
+
+        return null
+    }
+
+    @SuppressLint("Range")
+    private fun resolveNumberForName(name: String): String? {
+        return try {
+            val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+            val cursor = context.contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                arrayOf("%$name%"),
+                null
+            )
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    it.getString(it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER))
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun sendWhatsappDirect(target: String, message: String): Boolean {
+        return try {
             val isBusiness = preferences.isWhatsappBusiness.first()
             val pkg = if (isBusiness) "com.whatsapp.w4b" else "com.whatsapp"
             val digits = target.replace(Regex("""[^\d]"""), "")
@@ -210,24 +294,77 @@ class CallAnnouncementManager(
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 context.startActivity(directIntent)
-                delay(1200)
-                rootManager.execute("input keyevent 66")
+                delay(400)
+                val a11y = AuraAccessibilityService.instance
+                if (a11y != null) {
+                    a11y.typeAndSendInCurrentChat(cleanMsg)
+                } else {
+                    rootManager.execute("input keyevent 66")
+                }
+                true
             } else {
                 AuraNotificationListener.replyToNotification(target, cleanMsg)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed sending auto-reply via WhatsApp: ${e.message}", e)
+            false
+        }
+    }
+
+    private suspend fun sendSmsDirect(number: String, message: String): Boolean {
+        return try {
+            val sms = SmsManager.getDefault()
+            val parts = sms.divideMessage(message)
+            sms.sendMultipartTextMessage(number, null, parts, null, null)
+            true
+        } catch (e: Exception) {
+            val res = rootManager.execute("service call isms 7 i32 0 s16 \"com.android.mms\" s16 \"$number\" s16 \"null\" s16 \"$message\"")
+            res.success
+        }
+    }
+
+    private var originalRingerVolume: Int? = null
+
+    fun restoreRingerVolume() {
+        originalRingerVolume?.let { vol ->
+            try {
+                audioManager.setStreamVolume(AudioManager.STREAM_RING, vol, 0)
+                Log.i(TAG, "Restored normal ringer volume to $vol")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to restore ringer volume: ${e.message}")
+            }
+            originalRingerVolume = null
         }
     }
 
     private fun announceIncomingCall(caller: String, isVoip: Boolean, appName: String? = null) {
         scope.launch {
+            val service = AuraForegroundService.currentService
+            val isAiActive = AuraForegroundService.isCallActive.value && service != null &&
+                    service.liveClient.connectionState.value == com.example.core.live.LiveConnectionState.Connected
+
+            if (!isAiActive) {
+                // If AI is not active, play normal ring volume! Do not lower volume.
+                Log.i(TAG, "AI session is inactive. Keeping normal full ring volume.")
+                return@launch
+            }
+
+            // Lower ringer volume ONLY when AI session is active
             try {
+                if (originalRingerVolume == null) {
+                    originalRingerVolume = audioManager.getStreamVolume(AudioManager.STREAM_RING)
+                }
                 val maxRing = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING)
                 val softRing = (maxRing * 0.05f).toInt().coerceAtLeast(1)
                 audioManager.setStreamVolume(AudioManager.STREAM_RING, softRing, 0)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed setting soft ringer volume: ${e.message}")
+            }
+
+            // If user is muted and AI is active in background, automatically unmute user
+            if (service.audioStreamer.isMuted.value) {
+                Log.i(TAG, "Incoming call while muted: Automatically unmuting user microphone.")
+                service.audioStreamer.setMuted(false)
             }
 
             val owner = preferences.ownerName.first().ifBlank { "Boss" }
@@ -248,9 +385,7 @@ class CallAnnouncementManager(
 
             Log.i(TAG, "Incoming call announcement: $announcement")
 
-            AuraForegroundService.currentService?.let { service ->
-                service.liveClient.sendTextMessage("[SYSTEM EVENT: Incoming Call from $cleanCaller. Say immediately: \"$announcement\"]")
-            }
+            service.liveClient.sendTextMessage("[SYSTEM EVENT: Incoming Call from $cleanCaller. Say immediately: \"$announcement\"]")
         }
     }
 

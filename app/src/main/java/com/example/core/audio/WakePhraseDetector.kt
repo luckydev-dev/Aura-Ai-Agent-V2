@@ -46,8 +46,9 @@ class WakePhraseDetector(
 
     private fun buildGrammarJson(): String {
         val name = assistantName.trim().lowercase().ifBlank { "maya" }
+        // Require explicit 2-word wake phrases: NO standalone single-word triggers
         val phrases = mutableSetOf(
-            "hey $name", "hi $name", "hello $name", "ok $name", name,
+            "hey $name", "ok $name", "hello $name",
             "[unk]"
         )
         val arr = JSONArray()
@@ -98,7 +99,7 @@ class WakePhraseDetector(
             isListening = true
             _isDetectorActive.value = true
 
-            Log.i(TAG, "WakePhraseDetector listening strictly for '$assistantName' (sensitivity=$sensitivity)")
+            Log.i(TAG, "WakePhraseDetector listening strictly for two-word phrase 'Hey/Ok $assistantName'")
 
             listeningJob = scope.launch(Dispatchers.IO) {
                 val buffer = ByteArray(4096)
@@ -106,8 +107,17 @@ class WakePhraseDetector(
                     val read = record.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         val isFinal = rec.acceptWaveForm(buffer, read)
-                        val resultJson = if (isFinal) rec.result else rec.partialResult
-                        checkWakePhraseMatch(resultJson, buffer, read)
+                        if (isFinal) {
+                            checkWakePhraseMatch(rec.result, buffer, read)
+                        } else {
+                            // Check partial only if it explicitly contains the full 2-word phrase
+                            val partialJson = rec.partialResult
+                            if (partialJson.contains("hey $assistantName", ignoreCase = true) ||
+                                partialJson.contains("ok $assistantName", ignoreCase = true)
+                            ) {
+                                checkWakePhraseMatch(partialJson, buffer, read)
+                            }
+                        }
                     }
                 }
             }
@@ -125,27 +135,17 @@ class WakePhraseDetector(
             val text = (if (json.has("text")) json.optString("text") else json.optString("partial")).trim().lowercase()
             if (text.isNotBlank() && text != "[unk]") {
                 _lastHeardText.value = text
-                Log.d(TAG, "Vosk heard: $text")
+                Log.d(TAG, "Vosk confirmed: $text")
 
                 val targetName = assistantName.trim().lowercase().ifBlank { "maya" }
 
-                val matches = when (sensitivity.lowercase()) {
-                    "strict" -> {
-                        text.contains("hey $targetName") || text.contains("hi $targetName") ||
-                                text.contains("hello $targetName") || text.contains("ok $targetName")
-                    }
-                    "loose" -> {
-                        text.contains(targetName)
-                    }
-                    else -> { // "normal"
-                        text.contains(targetName) &&
-                                (text.contains("hey") || text.contains("hi") || text.contains("hello") || text.contains("ok") || text == targetName)
-                    }
-                }
+                // Strictly require explicit 2-word phrase: 'hey maya', 'ok maya', or 'hello maya'
+                val validPhrases = listOf("hey $targetName", "ok $targetName", "hello $targetName")
+                val matches = validPhrases.any { text.contains(it) }
 
                 if (matches) {
                     val now = System.currentTimeMillis()
-                    if (now - lastTriggerTimestamp > 3000L) {
+                    if (now - lastTriggerTimestamp > 5000L) {
                         // Check owner voice recognition if profile exists
                         if (ownerVoiceVerifier.hasProfile()) {
                             val pcmShorts = ShortArray(readSize / 2)
@@ -162,7 +162,7 @@ class WakePhraseDetector(
                         }
 
                         lastTriggerTimestamp = now
-                        Log.i(TAG, "🎯 Wake phrase triggered for '$targetName': '$text'")
+                        Log.i(TAG, "🎯 Confirmed 2-word wake phrase triggered: '$text'")
                         stopListening()
                         onWakePhraseDetected()
                     }

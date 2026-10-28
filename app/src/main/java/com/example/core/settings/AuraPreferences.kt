@@ -109,6 +109,10 @@ class AuraPreferences(
         val KEY_NOTIF_ANNOUNCE_ENABLED = booleanPreferencesKey("notif_announce_enabled")
         val KEY_NOTIF_ANNOUNCE_APPS = stringSetPreferencesKey("notif_announce_apps")
         val KEY_NOTIF_ANNOUNCE_READ_CONTENT = booleanPreferencesKey("notif_announce_read_content")
+        val KEY_NOTIF_ANNOUNCE_LANGUAGE = stringPreferencesKey("notif_announce_language")
+        val KEY_NOTIF_BLOCK_BANKING_OTP = booleanPreferencesKey("notif_block_banking_otp")
+        val KEY_NOTIF_AUTO_REPLY_BUSY = booleanPreferencesKey("notif_auto_reply_busy")
+        val KEY_NOTIF_AUTO_REPLY_MESSAGE = stringPreferencesKey("notif_auto_reply_message")
 
         // Owner Voice Security Lock
         val KEY_OWNER_VOICE_LOCK_ENABLED = booleanPreferencesKey("owner_voice_lock_enabled")
@@ -498,6 +502,31 @@ class AuraPreferences(
         it[KEY_NOTIF_ANNOUNCE_READ_CONTENT] ?: true
     }
 
+    val notifAnnounceLanguage: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_ANNOUNCE_LANGUAGE] ?: "Hinglish"
+    }
+
+    val notifBlockBankingOtp: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_BLOCK_BANKING_OTP] ?: true
+    }
+
+    val notifAutoReplyBusy: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_AUTO_REPLY_BUSY] ?: false
+    }
+
+    val notifAutoReplyMessage: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_AUTO_REPLY_MESSAGE] ?: "Mai busy hu, baad me text karta hu."
+    }
+
+    suspend fun setNotifAutoReplyBusy(enabled: Boolean, message: String? = null) {
+        context.dataStore.edit {
+            it[KEY_NOTIF_AUTO_REPLY_BUSY] = enabled
+            if (message != null) {
+                it[KEY_NOTIF_AUTO_REPLY_MESSAGE] = message
+            }
+        }
+    }
+
     val ownerVoiceLockEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_OWNER_VOICE_LOCK_ENABLED] ?: false
     }
@@ -704,6 +733,8 @@ class AuraPreferences(
         prefs[KEY_NOTIF_ANNOUNCE_APPS] = cur
     }
     suspend fun setNotifAnnounceReadContent(readContent: Boolean) = context.dataStore.edit { it[KEY_NOTIF_ANNOUNCE_READ_CONTENT] = readContent }
+    suspend fun setNotifAnnounceLanguage(language: String) = context.dataStore.edit { it[KEY_NOTIF_ANNOUNCE_LANGUAGE] = language }
+    suspend fun setNotifBlockBankingOtp(block: Boolean) = context.dataStore.edit { it[KEY_NOTIF_BLOCK_BANKING_OTP] = block }
     suspend fun setOwnerVoiceLockEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_OWNER_VOICE_LOCK_ENABLED] = enabled }
 
     suspend fun setSafeModeTriggered(triggered: Boolean) = context.dataStore.edit { it[KEY_SAFE_MODE_TRIGGERED] = triggered }

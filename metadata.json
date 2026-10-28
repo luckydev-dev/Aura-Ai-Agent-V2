@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "Maya ai",
+  "description": "Maya AI - Your intelligent, realtime voice companion with live Gemini streaming, screen automation, and device control.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -17,12 +17,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.ArrayDeque
 import kotlin.math.sqrt
 
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+
 enum class AudioRecordState {
     IDLE, RECORDING, INIT_FAILED, PERMISSION_DENIED
 }
 
 class AudioRecordStreamer(
-    private val onChunkEncoded: (String) -> Unit
+    private val onChunkEncoded: (String) -> Unit,
+    private val voskModelManager: VoskModelManager? = null,
+    private val onLocalUnmuteDetected: (() -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "Aura"
@@ -62,12 +68,16 @@ class AudioRecordStreamer(
     private val _gatedFramesCount = MutableStateFlow(0L)
     val gatedFramesCount: StateFlow<Long> = _gatedFramesCount.asStateFlow()
 
-    // Settings
-    var noiseGateStrength: String = "Medium" // Off, Low, Medium, High
+    // Settings: Default to "Off" so user's natural voice is never clipped or gated!
+    var noiseGateStrength: String = "Off" // Off, Low, Medium, High
     var isAuraSpeaking: Boolean = false
     var isHeadphonesMode: Boolean = false
     var ownerVoiceLockEnabled: Boolean = false
     var ownerVoiceVerifier: OwnerVoiceVerifier? = null
+
+    // Local offline unmute recognizer
+    private var unmuteVoskModel: Model? = null
+    private var unmuteRecognizer: Recognizer? = null
 
     // 1st-order High-Pass Filter state (~120Hz cutoff at 16kHz: alpha ≈ 0.955f)
     private val hpAlpha = 0.955f
@@ -84,6 +94,24 @@ class AudioRecordStreamer(
 
     fun setMuted(muted: Boolean) {
         _isMuted.value = muted
+        if (muted) {
+            _micAmplitude.value = 0f
+        }
+    }
+
+    private fun setupUnmuteRecognizer() {
+        if (unmuteRecognizer == null && voskModelManager?.isModelReady() == true) {
+            try {
+                if (unmuteVoskModel == null) {
+                    unmuteVoskModel = Model(voskModelManager.getModelDirectory().absolutePath)
+                }
+                val grammar = "[\"unmute\", \"unmute karo\", \"mic on\", \"mic on karo\", \"unmute me\", \"chalu karo\", \"[unk]\"]"
+                unmuteRecognizer = Recognizer(unmuteVoskModel, SAMPLE_RATE.toFloat(), grammar)
+                Log.i(TAG, "Local offline unmute recognizer initialized")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed creating unmute recognizer: ${e.message}")
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -95,10 +123,10 @@ class AudioRecordStreamer(
 
         var record: AudioRecord? = null
 
-        // Attempt 1: VOICE_COMMUNICATION (hardware AEC enabled)
+        // Primary: VOICE_RECOGNITION - Speech-tuned frequency response without VoIP echo ducking
         try {
             record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -107,13 +135,15 @@ class AudioRecordStreamer(
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 record.release()
                 record = null
+            } else {
+                Log.i(TAG, "AudioRecord initialized using VOICE_RECOGNITION")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "AudioRecord VOICE_COMMUNICATION failed to init, trying MIC fallback: ${e.message}")
+            Log.w(TAG, "AudioRecord VOICE_RECOGNITION init failed, trying MIC: ${e.message}")
             record = null
         }
 
-        // Attempt 2: Fallback to MIC
+        // Fallback 1: MIC
         if (record == null) {
             try {
                 record = AudioRecord(
@@ -125,12 +155,33 @@ class AudioRecordStreamer(
                 )
                 if (record.state != AudioRecord.STATE_INITIALIZED) {
                     record.release()
+                    record = null
+                } else {
+                    Log.i(TAG, "AudioRecord initialized using MIC")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioRecord MIC init failed", e)
+            }
+        }
+
+        // Fallback 2: VOICE_COMMUNICATION
+        if (record == null) {
+            try {
+                record = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    SAMPLE_RATE,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    bufferSize
+                )
+                if (record.state != AudioRecord.STATE_INITIALIZED) {
+                    record.release()
                     _recordState.value = AudioRecordState.INIT_FAILED
-                    diagnostics?.setAudioRecordState("Init Failed (MIC uninitialized)")
+                    diagnostics?.setAudioRecordState("Init Failed (uninitialized)")
                     return false
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "AudioRecord MIC init failed", e)
+                Log.e(TAG, "AudioRecord VOICE_COMMUNICATION init failed", e)
                 _recordState.value = AudioRecordState.INIT_FAILED
                 diagnostics?.setAudioRecordState("Init Failed: ${e.message}")
                 return false
@@ -182,6 +233,27 @@ class AudioRecordStreamer(
                 while (isActive && isRecording) {
                     val read = activeRecord.read(rawBuffer, 0, rawBuffer.size)
                     if (read > 0) {
+                        val isCurrentlyMuted = _isMuted.value
+                        if (isCurrentlyMuted) {
+                            setupUnmuteRecognizer()
+                            unmuteRecognizer?.let { rec ->
+                                val accepted = rec.acceptWaveForm(rawBuffer, read)
+                                val text = if (accepted) {
+                                    runCatching { JSONObject(rec.result).optString("text", "") }.getOrDefault("")
+                                } else {
+                                    runCatching { JSONObject(rec.partialResult).optString("partial", "") }.getOrDefault("")
+                                }
+                                if (text.isNotBlank()) {
+                                    val lower = text.lowercase()
+                                    if (lower.contains("unmute") || lower.contains("mic on") || lower.contains("chalu karo") || lower.contains("on karo")) {
+                                        Log.i(TAG, "Offline Vosk detected unmute keyword: '$lower'")
+                                        setMuted(false)
+                                        onLocalUnmuteDetected?.invoke()
+                                    }
+                                }
+                            }
+                        }
+
                         // 1. High-Pass Filter (120 Hz)
                         val filteredBuffer = ByteArray(read)
                         var sum = 0.0
@@ -209,13 +281,6 @@ class AudioRecordStreamer(
                         val normalizedAmp = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
                         _micAmplitude.value = if (_isMuted.value) 0f else normalizedAmp
 
-                        if (_isMuted.value) {
-                            // If muted, send digital silence
-                            onChunkEncoded(silenceChunkBase64)
-                            _isGateOpen.value = false
-                            continue
-                        }
-
                         // 3. Adaptive Noise Floor Tracking (slow EMA during quiet)
                         val currentNoiseFloor = _noiseFloor.value
                         if (rms < currentNoiseFloor * 2.0 && rms > 20.0) {
@@ -225,9 +290,9 @@ class AudioRecordStreamer(
                         // 4. Threshold & Consecutive frames criteria
                         val gateStrength = noiseGateStrength.lowercase()
                         if (gateStrength == "off") {
-                            // Gate disabled: send all audio
+                            // Gate disabled: send clean, pristine unclipped audio straight to Gemini Live
                             _isGateOpen.value = true
-                            val base64Chunk = Base64.encodeToString(filteredBuffer, 0, read, Base64.NO_WRAP)
+                            val base64Chunk = Base64.encodeToString(rawBuffer, 0, read, Base64.NO_WRAP)
                             onChunkEncoded(base64Chunk)
                             continue
                         }
@@ -344,6 +409,11 @@ class AudioRecordStreamer(
         echoCanceler = null
         noiseSuppressor = null
         gainControl = null
+
+        try {
+            unmuteRecognizer?.close()
+        } catch (_: Exception) {}
+        unmuteRecognizer = null
 
         preRollBuffer.clear()
         _micAmplitude.value = 0f

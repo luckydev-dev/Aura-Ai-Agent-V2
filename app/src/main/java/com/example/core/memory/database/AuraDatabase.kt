@@ -60,6 +60,9 @@ interface UserFactDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(fact: UserFactEntity): Long
 
+    @Query("UPDATE user_facts SET `key` = :key, value = :value, category = :category WHERE id = :id")
+    suspend fun updateById(id: Long, key: String, value: String, category: String)
+
     @Query("DELETE FROM user_facts WHERE id = :id")
     suspend fun deleteById(id: Long)
 
