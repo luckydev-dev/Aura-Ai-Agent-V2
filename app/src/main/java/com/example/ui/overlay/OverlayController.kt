@@ -244,6 +244,15 @@ class OverlayController(
         }
     }
 
+    fun showCallOverlays() {
+        controllerScope.launch {
+            reEvaluateOverlays(AppForegroundState.current)
+            if (preferences.overlayEnabled.first()) {
+                overlayManager.showOverlay()
+            }
+        }
+    }
+
     fun hideAll() {
         edgeLightingOverlay.hide()
         overlayManager.hideOverlay()

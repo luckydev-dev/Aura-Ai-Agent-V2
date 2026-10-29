@@ -42,6 +42,10 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
         }
     }
 
+    val notificationAnnouncementManager: com.example.core.telephony.NotificationAnnouncementManager
+        get() = com.example.core.telephony.NotificationAnnouncementManager.instance
+            ?: com.example.core.telephony.NotificationAnnouncementManager(this, com.example.core.settings.AuraPreferences(this))
+
     companion object {
         private const val TAG = "Aura"
         lateinit var instance: AuraApplication
@@ -70,6 +74,7 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
 
         overlayManager = OverlayManager(this)
         com.example.core.telephony.NotificationAnnouncementManager(this, AuraPreferences(this))
+        com.example.core.messaging.AutoReplyCoordinator.getInstance(this, AuraPreferences(this))
 
         appScope.launch {
             try {
@@ -81,6 +86,31 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
                 rootManager.execute("settings put global block_untrusted_touches 0")
             } catch (e: Exception) {
                 Log.w(TAG, "Error disabling untrusted touches on init: ${e.message}")
+            }
+            // Cleanup legacy auto_reply_busy_rule from user_facts
+            try {
+                com.example.core.memory.MemoryRepository(this@AuraApplication).deleteFactByKey("auto_reply_busy_rule")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error cleaning up auto_reply_busy_rule: ${e.message}")
+            }
+            // Automatically configure Aura as default assistant and call screening via root if available
+            try {
+                if (rootManager.isRootAvailable()) {
+                    rootManager.execute("settings put secure assistant com.example/com.example.service.AuraVoiceInteractionService")
+                    rootManager.execute("settings put secure voice_interaction_service com.example/com.example.service.AuraVoiceInteractionService")
+                    rootManager.execute("settings put secure voice_recognition_service com.example/com.example.service.AuraRecognitionService")
+                    rootManager.execute("cmd role add-role-holder --user 0 android.app.role.ASSISTANT com.example")
+                    rootManager.execute("cmd role add-role-holder --user 0 android.app.role.CALL_SCREENING com.example")
+                    Log.i(TAG, "Aura configured as default assistant & call screener via Root")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error configuring default assistant via root: ${e.message}")
+            }
+            // Schedule active routines with exact alarms
+            try {
+                com.example.core.scheduler.RoutineScheduler(this@AuraApplication).scheduleAllActiveRoutines()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error scheduling routines: ${e.message}")
             }
         }
     }

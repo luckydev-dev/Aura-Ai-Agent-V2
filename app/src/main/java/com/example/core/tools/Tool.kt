@@ -12,5 +12,7 @@ interface Tool {
     val name: String
     val description: String
     val parametersSchema: Map<String, Any?>
+    val retryable: Boolean get() = true
+    val timeoutMs: Long get() = 15_000L
     suspend fun execute(args: Map<String, Any?>): ToolExecutionResult
 }

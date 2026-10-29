@@ -1,6 +1,7 @@
 package com.example.core.memory
 
 import android.content.Context
+import android.util.Log
 import com.example.core.memory.database.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -12,6 +13,9 @@ class MemoryRepository(context: Context) {
     private val userFactDao = database.userFactDao()
     private val taskExecutionDao = database.taskExecutionDao()
     private val routineDao = database.routineDao()
+    private val episodeDao = database.episodeDao()
+    private val contactProfileDao = database.contactProfileDao()
+    private val learnedSkillDao = database.learnedSkillDao()
 
     // Conversations
     fun getRecentConversations(limit: Int = 100): Flow<List<ConversationEntity>> =
@@ -87,7 +91,8 @@ class MemoryRepository(context: Context) {
             UserFactEntity(
                 key = key.trim(),
                 value = value.trim(),
-                category = category.trim()
+                category = category.trim(),
+                updatedAt = System.currentTimeMillis()
             )
         )
     }
@@ -100,23 +105,98 @@ class MemoryRepository(context: Context) {
         return userFactDao.findByKey(key.trim())?.value
     }
 
+    suspend fun deleteFactByKey(key: String) {
+        userFactDao.deleteByKey(key.trim())
+    }
+
     suspend fun deleteFact(id: Long) = userFactDao.deleteById(id)
     suspend fun clearAllFacts() = userFactDao.clearAll()
 
+    suspend fun searchFacts(query: String): List<UserFactEntity> {
+        return userFactDao.searchFacts(query.trim())
+    }
+
+    // Episodes
+    fun getRecentEpisodes(limit: Int = 10): Flow<List<EpisodeEntity>> =
+        episodeDao.getRecentEpisodes(limit)
+
+    suspend fun getLatestEpisode(): EpisodeEntity? = episodeDao.getLatestEpisode()
+
+    suspend fun saveEpisode(sessionId: String, summary: String, topics: String, mood: String = "neutral"): Long {
+        return episodeDao.insert(
+            EpisodeEntity(
+                sessionId = sessionId,
+                summary = summary.trim(),
+                topics = topics.trim(),
+                mood = mood.trim()
+            )
+        )
+    }
+
+    suspend fun searchEpisodes(query: String): List<EpisodeEntity> =
+        episodeDao.searchEpisodes(query.trim())
+
+    // Contact Profiles
+    suspend fun findContactProfile(contactKey: String): ContactProfileEntity? {
+        val clean = contactKey.replace(Regex("""[^\d]"""), "").ifBlank { contactKey.trim() }
+        return contactProfileDao.findByKey(clean)
+    }
+
+    suspend fun saveContactProfile(profile: ContactProfileEntity): Long {
+        return contactProfileDao.insertOrUpdate(profile)
+    }
+
+    suspend fun searchContactProfiles(query: String): List<ContactProfileEntity> {
+        return contactProfileDao.searchProfiles(query.trim())
+    }
+
+    // Learned Skills
+    suspend fun findMatchingSkill(goal: String): LearnedSkillEntity? {
+        return learnedSkillDao.findMatchingSkill(goal.trim())
+    }
+
+    suspend fun saveLearnedSkill(goalPattern: String, toolSequenceJson: String): Long {
+        return learnedSkillDao.insertOrUpdate(
+            LearnedSkillEntity(
+                goalPattern = goalPattern.trim(),
+                toolSequenceJson = toolSequenceJson.trim()
+            )
+        )
+    }
+
     /**
-     * Builds a compact string of user facts & aliases to inject into the Gemini system prompt.
+     * Builds top-k relevant memories and facts with ~1,500 tokens cap (~6,000 chars)
+     * plus latest episode summary.
      */
     suspend fun buildMemoryContextSummary(): String {
         return try {
-            val facts = userFactDao.getAll().first()
-            if (facts.isEmpty()) return ""
-            val sb = StringBuilder("User Known Facts & Aliases:\n")
-            facts.forEach { fact ->
-                sb.append("- [${fact.category}] ${fact.key}: ${fact.value}\n")
+            val sb = StringBuilder()
+
+            // 1. Inject latest episode summary if present
+            val latestEpisode = episodeDao.getLatestEpisode()
+            if (latestEpisode != null && latestEpisode.summary.isNotBlank()) {
+                sb.append("=== LAST CONVERSATION EPISODE ===\n")
+                sb.append("Summary: ${latestEpisode.summary}\n")
+                sb.append("Topics: ${latestEpisode.topics} (Mood: ${latestEpisode.mood})\n\n")
             }
-            sb.toString()
+
+            // 2. Fetch recent and prioritized facts
+            val facts = userFactDao.getRecentFacts(25)
+            if (facts.isNotEmpty()) {
+                sb.append("=== USER KNOWN FACTS & ALIASES ===\n")
+                var charCount = 0
+                for (fact in facts) {
+                    if (fact.key.equals("auto_reply_busy_rule", ignoreCase = true)) continue
+                    val line = "- [${fact.category}] ${fact.key}: ${fact.value}\n"
+                    if (charCount + line.length > 5500) break // ~1500 tokens cap
+                    sb.append(line)
+                    charCount += line.length
+                }
+            }
+
+            sb.toString().trim()
         } catch (e: Exception) {
-            android.util.Log.e("Aura", "Failed to build memory context summary", e)
+            Log.e("Aura", "Failed to build memory context summary", e)
             ""
         }
     }

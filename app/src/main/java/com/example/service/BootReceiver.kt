@@ -30,6 +30,26 @@ class BootReceiver : BroadcastReceiver() {
         if (intent?.action == Intent.ACTION_BOOT_COMPLETED) {
             val prefs = AuraPreferences(context)
             CoroutineScope(Dispatchers.IO).launch {
+                // 1. Re-apply Default Assistant settings
+                val pkg = context.packageName
+                val assistSvc = "$pkg/com.example.service.AuraVoiceInteractionService"
+                try {
+                    Shell.cmd(
+                        "settings put secure assistant \"$assistSvc\"",
+                        "settings put secure voice_interaction_service \"$assistSvc\""
+                    ).exec()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed applying assistant settings at boot: ${e.message}")
+                }
+
+                // 2. Schedule all active exact alarm routines
+                try {
+                    com.example.core.scheduler.RoutineScheduler(context).scheduleAllActiveRoutines()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed scheduling active routines at boot: ${e.message}")
+                }
+
+                // 3. Wake listening if configured
                 val wakeEnabled = prefs.wakePhraseEnabled.first()
                 if (wakeEnabled) {
                     Log.i(TAG, "Boot completed. Initiating WAKE_LISTENING (not a Live call)")

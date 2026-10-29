@@ -90,21 +90,29 @@ class CallAnnouncementManager(
             TelephonyManager.CALL_STATE_RINGING -> {
                 isRinging = true
                 isVoipCall = false
-                val callerNumber = number ?: ""
-                val contactName = resolveCallerName(callerNumber)
+                val session = CallSessionTracker.onRinging(number = number, app = "Phone", isVoip = false)
+                val callerNumber = session.number
+                val contactName = session.callerName ?: callerNumber?.let { resolveCallerName(it) }
                 activeCallerName = contactName
                 activeCallerNumber = callerNumber
 
                 scope.launch {
                     val autoReject = preferences.callAutoRejectEnabled.first()
                     if (autoReject) {
-                        executeAutoReject(contactName ?: callerNumber.ifBlank { "Caller" }, callerNumber, isVoip = false)
+                        CallRejectResponder.handleAutoReject(
+                            context = context,
+                            rootManager = rootManager,
+                            preferences = preferences,
+                            session = session,
+                            rejectAction = { rejectCall() }
+                        )
                         return@launch
                     }
 
                     val enabled = preferences.callAnnouncementEnabled.first()
                     if (enabled) {
-                        announceIncomingCall(contactName ?: callerNumber.ifBlank { "Unknown Caller" }, isVoip = false)
+                        val displayCaller = contactName ?: callerNumber?.ifBlank { "Unknown Caller" } ?: "Unknown Caller"
+                        announceIncomingCall(displayCaller, isVoip = false)
                     }
                 }
             }
@@ -120,7 +128,30 @@ class CallAnnouncementManager(
                 restoreRingerVolume()
                 activeCallerName = null
                 activeCallerNumber = null
+                CallSessionTracker.onCallEnded()
             }
+        }
+    }
+
+    fun onPhoneStateNumberDetected(number: String) {
+        val session = CallSessionTracker.onNumberDiscovered(number)
+        activeCallerNumber = session.number
+        if (activeCallerName == null) {
+            activeCallerName = resolveCallerName(number)
+        }
+    }
+
+    fun onCallScreenedAndRejected(number: String) {
+        val session = CallSessionTracker.onScreeningDisallowed(number)
+        activeCallerNumber = session.number
+        scope.launch {
+            CallRejectResponder.handleAutoReject(
+                context = context,
+                rootManager = rootManager,
+                preferences = preferences,
+                session = session,
+                rejectAction = { true }
+            )
         }
     }
 
@@ -135,14 +166,21 @@ class CallAnnouncementManager(
             }
             val cleanCaller = caller.replace(Regex("""(?i)^(whatsapp\s+call\s+from\s+|call\s+from\s+)"""), "").trim()
 
+            val session = CallSessionTracker.onVoipNotification(appName = cleanAppName, callerName = cleanCaller)
             isRinging = true
             isVoipCall = true
             activeCallerName = cleanCaller
-            activeCallerNumber = ""
+            activeCallerNumber = session.number
 
             val autoReject = preferences.callAutoRejectEnabled.first()
             if (autoReject) {
-                executeAutoReject(cleanCaller, "", isVoip = true, appName = cleanAppName)
+                CallRejectResponder.handleAutoReject(
+                    context = context,
+                    rootManager = rootManager,
+                    preferences = preferences,
+                    session = session,
+                    rejectAction = { rejectCall() }
+                )
                 return@launch
             }
 
@@ -151,49 +189,6 @@ class CallAnnouncementManager(
             if (enabled && allowWhatsapp) {
                 announceIncomingCall(cleanCaller, isVoip = true, appName = cleanAppName)
             }
-        }
-    }
-
-    private suspend fun executeAutoReject(caller: String, number: String, isVoip: Boolean, appName: String? = null) {
-        Log.i(TAG, "Executing auto-reject for incoming call from $caller ($number, isVoip=$isVoip)...")
-        rejectCall()
-
-        val autoReplyMsg = preferences.callAutoRejectMessage.first().ifBlank { "Mai busy hu, baad me call karta hu." }
-        var cleanMsg = autoReplyMsg.trim()
-        while (cleanMsg.endsWith("/") || cleanMsg.endsWith("/?")) {
-            cleanMsg = cleanMsg.removeSuffix("/?").removeSuffix("/").trim()
-        }
-
-        // Active resolution of incoming phone number if not provided by Telephony listener
-        var targetNumber = number.trim()
-        if (targetNumber.isBlank()) {
-            targetNumber = getLatestIncomingNumber() ?: ""
-        }
-        if (targetNumber.isBlank() && caller.isNotBlank() && !caller.equals("Caller", ignoreCase = true) && !caller.equals("Unknown Caller", ignoreCase = true)) {
-            targetNumber = resolveNumberForName(caller) ?: ""
-        }
-
-        var waSent = false
-        var smsSent = false
-
-        // User preference & decision: Check WhatsApp contact first, then fallback to SMS
-        val hasWhatsapp = if (targetNumber.isNotBlank()) isNumberOnWhatsapp(targetNumber) else false
-
-        if (hasWhatsapp && targetNumber.isNotBlank()) {
-            waSent = sendWhatsappDirect(targetNumber, cleanMsg)
-        }
-
-        // If not on WhatsApp or WhatsApp delivery failed, fallback to normal SMS
-        if (!waSent && targetNumber.isNotBlank()) {
-            smsSent = sendSmsDirect(targetNumber, cleanMsg)
-        } else if (!waSent && isVoip) {
-            // For VoIP calls (WhatsApp / Telegram call notification), reply directly via notification action
-            AuraNotificationListener.replyToNotification(caller, cleanMsg)
-            waSent = true
-        }
-
-        AuraForegroundService.currentService?.let { service ->
-            service.liveClient.sendTextMessage("[SYSTEM EVENT: Auto-rejected call from $caller. Busy message sent (WhatsApp=$waSent, SMS=$smsSent, Target=$targetNumber): \"$cleanMsg\"]")
         }
     }
 
@@ -519,19 +514,22 @@ class CallAnnouncementManager(
     }
 
     suspend fun rejectCallWithMessage(message: String): Boolean {
-        val num = activeCallerNumber
+        val num = activeCallerNumber ?: ""
         rejectCall()
-        if (!num.isNullOrBlank()) {
-            return try {
-                val sms = SmsManager.getDefault()
-                sms.sendTextMessage(num, null, message, null, null)
-                true
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed sending SMS after call rejection", e)
-                false
-            }
-        }
-        return true
+        val session = CallSessionTracker.getActiveSession() ?: CallSession(
+            id = java.util.UUID.randomUUID().toString(),
+            startedAt = System.currentTimeMillis(),
+            number = num,
+            name = activeCallerName,
+            source = "TELEPHONY"
+        )
+        return CallRejectResponder.sendMessage(
+            context = context,
+            rootManager = rootManager,
+            preferences = preferences,
+            session = session,
+            message = message
+        )
     }
 
     suspend fun silenceRinger(): Boolean {

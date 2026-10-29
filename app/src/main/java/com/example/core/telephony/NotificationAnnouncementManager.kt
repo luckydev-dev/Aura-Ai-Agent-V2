@@ -181,19 +181,6 @@ class NotificationAnnouncementManager(
                 )
 
                 announce(announcementText, pkg, senderName, text)
-
-                // Check if automated busy reply is enabled for incoming chat messages
-                val autoReplyBusy = preferences.notifAutoReplyBusy.first()
-                if (autoReplyBusy && (pkg.contains("whatsapp") || pkg.contains("telegram") || pkg.contains("messaging"))) {
-                    val replyMsg = preferences.notifAutoReplyMessage.first()
-                    val replied = AuraNotificationListener.replyToNotification(sbn.key, replyMsg)
-                    if (replied) {
-                        Log.i(TAG, "Sent automated busy reply to $senderName on $pkg: '$replyMsg'")
-                        AuraForegroundService.currentService?.liveClient?.sendTextMessage(
-                            "[SYSTEM EVENT: Auto-replied to message from $senderName on $appLabel: \"$replyMsg\"]"
-                        )
-                    }
-                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in processNotification: ${e.message}", e)
             }
@@ -288,7 +275,7 @@ class NotificationAnnouncementManager(
             // Live AI Gemini voice call is active: announce naturally through the active agent stream
             Log.i(TAG, "Announcing notification naturally via Maya live voice: $announcement")
             val cleanContent = sanitizeNotificationText(rawContent)
-            val prompt = "[SYSTEM EVENT: New Notification from $pkg by $sender: \"$cleanContent\". Say clearly in your natural voice: \"$announcement\"]"
+            val prompt = "[INFO — already handled by the app, do not repeat this action.] [SYSTEM EVENT: New Notification from $pkg by $sender: \"$cleanContent\". Say clearly in your natural voice: \"$announcement\"]"
             service.liveClient.sendTextMessage(prompt)
         } else {
             // Live call is not active: do NOT use robotic device TTS fallback (per user request)

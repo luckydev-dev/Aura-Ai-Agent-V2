@@ -691,6 +691,30 @@ fun SettingsScreen(
                             }
 
                             item {
+                                val isAssistant = remember { mutableStateOf(permissionDoctor.isDefaultAssistant()) }
+                                PermissionStatusCard(
+                                    title = "Default Phone Assistant",
+                                    description = "Allows triggering Maya by long-pressing power button or swiping from corner.",
+                                    isGranted = isAssistant.value,
+                                    actionLabel = if (isAssistant.value) "Active" else "Set as Default",
+                                    onAction = {
+                                        scope.launch {
+                                            val ok = permissionDoctor.fixDefaultAssistant()
+                                            isAssistant.value = ok
+                                            if (!ok) {
+                                                val intent = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).apply {
+                                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                                }
+                                                context.startActivity(intent)
+                                            } else {
+                                                Toast.makeText(context, "Aura set as default assistant!", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+
+                            item {
                                 val overlayActive = Settings.canDrawOverlays(context)
                                 PermissionStatusCard(
                                     title = "Display Over Other Apps",
@@ -1040,14 +1064,9 @@ fun SettingsScreen(
                                                 text = "Test Announcement Voice",
                                                 icon = Icons.Default.VolumeUp,
                                                 onClick = {
-                                                    com.example.core.telephony.NotificationAnnouncementManager.instance?.announceTest(
-                                                        appName = "WhatsApp",
-                                                        sender = "Rahul",
-                                                        message = "Aura notification speech is working smoothly."
-                                                    ) ?: run {
-                                                        val mgr = com.example.core.telephony.NotificationAnnouncementManager(context, preferences)
-                                                        mgr.announceTest("WhatsApp", "Rahul", "Aura notification speech is working smoothly.")
-                                                    }
+                                                    (com.example.core.telephony.NotificationAnnouncementManager.instance
+                                                        ?: com.example.AuraApplication.instance.notificationAnnouncementManager)
+                                                        .announceTest("WhatsApp", "Rahul", "Aura notification speech is working smoothly.")
                                                     Toast.makeText(context, "Playing test notification announcement...", Toast.LENGTH_SHORT).show()
                                                 },
                                                 modifier = Modifier.fillMaxWidth(),

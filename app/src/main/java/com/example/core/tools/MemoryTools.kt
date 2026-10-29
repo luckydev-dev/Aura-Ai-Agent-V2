@@ -141,5 +141,40 @@ class MemoryTools(
         }
     }
 
-    fun getAllTools(): List<Tool> = listOf(manageMemoryTool, saveMemoryTool)
+    val recallMemoryTool = object : Tool {
+        override val name = "recall_memory"
+        override val description = "Deep search across long-term memory facts, past conversational episodes, user preferences, and contact profiles."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "query" to mapOf(
+                    "type" to "string",
+                    "description" to "The topic, name, event, question, or key phrase to recall."
+                )
+            ),
+            "required" to listOf("query")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val query = args["query"]?.toString()?.trim() ?: return ToolExecutionResult(false, "Missing query")
+            val facts = memoryRepository.searchFacts(query)
+            val episodes = memoryRepository.searchEpisodes(query)
+
+            val sb = StringBuilder()
+            if (facts.isNotEmpty()) {
+                sb.appendLine("Facts:")
+                facts.forEach { sb.appendLine("- ${it.key}: ${it.value}") }
+            }
+            if (episodes.isNotEmpty()) {
+                sb.appendLine("Past Episodes:")
+                episodes.forEach { sb.appendLine("- [${it.topics}] ${it.summary}") }
+            }
+            if (sb.isBlank()) {
+                sb.append("No memory found matching '$query'.")
+            }
+            return ToolExecutionResult(true, sb.toString().trim())
+        }
+    }
+
+    fun getAllTools(): List<Tool> = listOf(manageMemoryTool, saveMemoryTool, recallMemoryTool)
 }

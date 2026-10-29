@@ -104,6 +104,8 @@ class AuraPreferences(
         val KEY_CALL_AUTO_REJECT_MESSAGE = stringPreferencesKey("call_auto_reject_message")
         val KEY_CALL_AUTO_REPLY_SMS = booleanPreferencesKey("call_auto_reply_sms")
         val KEY_CALL_AUTO_REPLY_WHATSAPP = booleanPreferencesKey("call_auto_reply_whatsapp")
+        val KEY_CALL_AUTO_REPLY_ONLY_CONTACTS = booleanPreferencesKey("call_auto_reply_only_contacts")
+        val KEY_DEFAULT_COUNTRY_ISO = stringPreferencesKey("default_country_iso")
 
         // Notification Announcement System
         val KEY_NOTIF_ANNOUNCE_ENABLED = booleanPreferencesKey("notif_announce_enabled")
@@ -113,6 +115,15 @@ class AuraPreferences(
         val KEY_NOTIF_BLOCK_BANKING_OTP = booleanPreferencesKey("notif_block_banking_otp")
         val KEY_NOTIF_AUTO_REPLY_BUSY = booleanPreferencesKey("notif_auto_reply_busy")
         val KEY_NOTIF_AUTO_REPLY_MESSAGE = stringPreferencesKey("notif_auto_reply_message")
+        val KEY_AUTO_REPLY_PACKAGES = stringSetPreferencesKey("auto_reply_packages")
+        val KEY_AUTO_REPLY_COOLDOWN_MINUTES = intPreferencesKey("auto_reply_cooldown_minutes")
+        val KEY_AUTO_REPLY_GROUPS = booleanPreferencesKey("auto_reply_groups")
+
+        // Proactive Check-in Settings
+        val KEY_PROACTIVE_MORNING_CHECKIN = booleanPreferencesKey("proactive_morning_checkin")
+        val KEY_PROACTIVE_NIGHT_CHECKIN = booleanPreferencesKey("proactive_night_checkin")
+        val KEY_PROACTIVE_BATTERY_CHECKIN = booleanPreferencesKey("proactive_battery_checkin")
+        val KEY_PROACTIVE_IDLE_CHECKIN = booleanPreferencesKey("proactive_idle_checkin")
 
         // Owner Voice Security Lock
         val KEY_OWNER_VOICE_LOCK_ENABLED = booleanPreferencesKey("owner_voice_lock_enabled")
@@ -124,6 +135,13 @@ class AuraPreferences(
             "com.google.android.apps.messaging",
             "com.google.android.gm",
             "com.instagram.android"
+        )
+
+        val DEFAULT_AUTO_REPLY_PACKAGES = setOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "org.telegram.messenger",
+            "com.google.android.apps.messaging"
         )
 
         // Safe Mode
@@ -357,7 +375,7 @@ class AuraPreferences(
     }
 
     val autoHangupSeconds: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_AUTO_HANGUP_SECONDS] ?: 30
+        it[KEY_AUTO_HANGUP_SECONDS] ?: 0
     }
 
     val wakePhraseEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -518,6 +536,42 @@ class AuraPreferences(
         it[KEY_NOTIF_AUTO_REPLY_MESSAGE] ?: "Mai busy hu, baad me text karta hu."
     }
 
+    val autoReplyPackages: Flow<Set<String>> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AUTO_REPLY_PACKAGES] ?: DEFAULT_AUTO_REPLY_PACKAGES
+    }
+
+    val autoReplyCooldownMinutes: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AUTO_REPLY_COOLDOWN_MINUTES] ?: 10
+    }
+
+    val autoReplyGroups: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AUTO_REPLY_GROUPS] ?: false
+    }
+
+    val callAutoReplyOnlyContacts: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_AUTO_REPLY_ONLY_CONTACTS] ?: false
+    }
+
+    val defaultCountryIso: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_DEFAULT_COUNTRY_ISO] ?: "IN"
+    }
+
+    val proactiveMorningCheckin: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PROACTIVE_MORNING_CHECKIN] ?: false
+    }
+
+    val proactiveNightCheckin: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PROACTIVE_NIGHT_CHECKIN] ?: false
+    }
+
+    val proactiveBatteryCheckin: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PROACTIVE_BATTERY_CHECKIN] ?: false
+    }
+
+    val proactiveIdleCheckin: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PROACTIVE_IDLE_CHECKIN] ?: false
+    }
+
     suspend fun setNotifAutoReplyBusy(enabled: Boolean, message: String? = null) {
         context.dataStore.edit {
             it[KEY_NOTIF_AUTO_REPLY_BUSY] = enabled
@@ -526,6 +580,16 @@ class AuraPreferences(
             }
         }
     }
+
+    suspend fun setAutoReplyPackages(packages: Set<String>) = context.dataStore.edit { it[KEY_AUTO_REPLY_PACKAGES] = packages }
+    suspend fun setAutoReplyCooldownMinutes(minutes: Int) = context.dataStore.edit { it[KEY_AUTO_REPLY_COOLDOWN_MINUTES] = minutes }
+    suspend fun setAutoReplyGroups(enabled: Boolean) = context.dataStore.edit { it[KEY_AUTO_REPLY_GROUPS] = enabled }
+    suspend fun setCallAutoReplyOnlyContacts(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_AUTO_REPLY_ONLY_CONTACTS] = enabled }
+    suspend fun setDefaultCountryIso(iso: String) = context.dataStore.edit { it[KEY_DEFAULT_COUNTRY_ISO] = iso.uppercase() }
+    suspend fun setProactiveMorningCheckin(enabled: Boolean) = context.dataStore.edit { it[KEY_PROACTIVE_MORNING_CHECKIN] = enabled }
+    suspend fun setProactiveNightCheckin(enabled: Boolean) = context.dataStore.edit { it[KEY_PROACTIVE_NIGHT_CHECKIN] = enabled }
+    suspend fun setProactiveBatteryCheckin(enabled: Boolean) = context.dataStore.edit { it[KEY_PROACTIVE_BATTERY_CHECKIN] = enabled }
+    suspend fun setProactiveIdleCheckin(enabled: Boolean) = context.dataStore.edit { it[KEY_PROACTIVE_IDLE_CHECKIN] = enabled }
 
     val ownerVoiceLockEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_OWNER_VOICE_LOCK_ENABLED] ?: false

@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.first
 
 enum class ServiceMode {
     STOPPED,
+    STANDBY,
     WAKE_LISTENING,
     IN_CALL
 }
@@ -54,6 +55,8 @@ class AuraForegroundService : Service() {
         const val ACTION_TOGGLE_MUTE = "com.example.aura.TOGGLE_MUTE"
         const val ACTION_TOGGLE_SPEAKER = "com.example.aura.TOGGLE_SPEAKER"
 
+        const val EXTRA_FROM_ASSIST = "extra_from_assist"
+
         const val CHANNEL_ID = "aura_live_call_channel"
         const val NOTIFICATION_ID = 1001
 
@@ -66,10 +69,13 @@ class AuraForegroundService : Service() {
         var currentService: AuraForegroundService? = null
             private set
 
-        fun startCall(context: Context) {
+        fun startCall(context: Context, fromAssistGesture: Boolean = false) {
             try {
                 val intent = Intent(context, AuraForegroundService::class.java).apply {
                     action = ACTION_START_CALL
+                    if (fromAssistGesture) {
+                        putExtra(EXTRA_FROM_ASSIST, true)
+                    }
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)
@@ -648,14 +654,29 @@ class AuraForegroundService : Service() {
     private fun checkReturnToWakeListening() {
         serviceScope.launch {
             val wakeEnabled = preferences.wakePhraseEnabled.first()
+            val autoReplyBusy = preferences.notifAutoReplyBusy.first()
+            val autoRejectCalls = preferences.callAutoRejectEnabled.first()
+            val isTaskRunning = com.example.core.agent.TaskManager.getInstanceOrNull()?.isAnyTaskRunning() == true
+
             if (wakeEnabled) {
                 Log.i(TAG, "Wake word enabled in settings. Returning to WAKE_LISTENING mode.")
                 initiateWakeListening()
+            } else if (autoReplyBusy || autoRejectCalls || isTaskRunning) {
+                Log.i(TAG, "Background features active (autoReply=$autoReplyBusy, autoReject=$autoRejectCalls, task=$isTaskRunning). Staying alive in STANDBY mode.")
+                enterStandbyMode()
             } else {
-                Log.i(TAG, "Wake word disabled. Stopping foreground service completely.")
+                Log.i(TAG, "Wake word and background features inactive. Stopping foreground service completely.")
                 stopForegroundAndSelf()
             }
         }
+    }
+
+    private fun enterStandbyMode() {
+        _isCallActive.value = false
+        _serviceMode.value = ServiceMode.STANDBY
+        wakePhraseDetector.stopListening()
+        overlayController.hideAll()
+        updateNotification()
     }
 
     private fun stopForegroundAndSelf() {

@@ -337,6 +337,7 @@ class ScreenAutomationTools(
     val runTaskTool = object : Tool {
         override val name = "run_task"
         override val description = "Executes an autonomous multi-step Android phone task using Gemini observation and planning."
+        override val timeoutMs = 120_000L
         override val parametersSchema = mapOf(
             "type" to "object",
             "properties" to mapOf(
@@ -349,249 +350,77 @@ class ScreenAutomationTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val goal = args["goal"]?.toString() ?: return ToolExecutionResult(false, "Missing goal")
             val maxSteps = (args["max_steps"] as? Number)?.toInt()?.coerceIn(1, 40) ?: 20
+            val tm = com.example.core.agent.TaskManager.getInstance(context)
+            return tm.executeTaskBlocking(goal, maxSteps)
+        }
+    }
 
-            val apiKey = preferences.apiKey.first()
-            val plannerModel = preferences.plannerModelName.first()
-            val useScreenshot = preferences.plannerUseScreenshots.first()
+    val startTaskTool = object : Tool {
+        override val name = "start_task"
+        override val description = "Starts an autonomous screen automation goal in the background so it outlives the current call and survives session disconnects."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "goal" to mapOf("type" to "string", "description" to "Clear description of the goal to accomplish on screen."),
+                "max_steps" to mapOf("type" to "integer", "description" to "Maximum number of steps (default 15).")
+            ),
+            "required" to listOf("goal")
+        )
 
-            isTaskCancelRequested = false
-            val taskId = UUID.randomUUID().toString()
-            val startTime = System.currentTimeMillis()
-            val history = mutableListOf<AgentActionHistory>()
-            val stepsJsonArray = JSONArray()
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val goal = args["goal"]?.toString() ?: return ToolExecutionResult(false, "Missing goal")
+            val maxSteps = (args["max_steps"] as? Number)?.toInt()?.coerceIn(1, 40) ?: 15
+            val tm = com.example.core.agent.TaskManager.getInstance(context)
+            val taskId = tm.startTask(goal, maxSteps)
+            return ToolExecutionResult(true, "Background task started with ID '$taskId'. Maya will perform this task in the background and notify you when complete.")
+        }
+    }
 
-            var taskOutcome = "Completed"
-            var taskSuccess = false
+    val taskStatusTool = object : Tool {
+        override val name = "task_status"
+        override val description = "Checks the status, current step, and result of a background agent task."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "task_id" to mapOf("type" to "string", "description" to "The ID of the task to check (or leave blank for the most recent task).")
+            )
+        )
 
-            try {
-                coroutineScope {
-                    activeTaskJob = coroutineContext[Job]
-
-                    for (step in 1..maxSteps) {
-                        if (isTaskCancelRequested || !isActive) {
-                            taskOutcome = "Task cancelled by user"
-                            return@coroutineScope
-                        }
-
-                        // 1. Wait for UI to settle
-                        val nodes = waitForUiIdle()
-
-                        // 2. Sensitive screen check
-                        val (isSensitive, reason) = agentPlanner.isSensitiveScreen(nodes)
-                        if (isSensitive) {
-                            taskOutcome = "Safety Layer: $reason. Requires manual user entry."
-                            taskSuccess = false
-                            return@coroutineScope
-                        }
-
-                        // 3. Loop guard
-                        if (agentPlanner.isRepeatingLoop(history)) {
-                            Log.w(TAG, "Repeating loop detected. Attempting to scroll or press back...")
-                            inputController.pressKey(4, "Back")
-                            delay(500)
-                        }
-
-                        // 4. Foreground app
-                        val fgApp = nodes.firstOrNull { it.packageName.isNotBlank() }?.packageName ?: "Unknown"
-
-                        // 5. Plan next step via Gemini REST
-                        val planResult = agentPlanner.planNextStep(
-                            apiKey = apiKey,
-                            modelName = plannerModel,
-                            goal = goal,
-                            nodes = nodes,
-                            foregroundApp = fgApp,
-                            history = history,
-                            useScreenshot = useScreenshot
-                        )
-
-                        if (planResult.isFailure) {
-                            taskOutcome = "Planning error: ${planResult.exceptionOrNull()?.message}"
-                            taskSuccess = false
-                            return@coroutineScope
-                        }
-
-                        val decision = planResult.getOrThrow()
-                        Log.i(TAG, "Planner Step $step: ${decision.action} - ${decision.thought}")
-
-                        val stepLogObj = JSONObject().apply {
-                            put("step", step)
-                            put("thought", decision.thought)
-                            put("action", decision.action)
-                            put("params", JSONObject(decision.params))
-                        }
-                        stepsJsonArray.put(stepLogObj)
-
-                        // 6. Report short step update to user via Maya's live voice (step by step)
-                        if (com.example.service.AuraForegroundService.isCallActive.value) {
-                            val stepNote = when (decision.action) {
-                                "open_app" -> "Opening ${decision.params["app_name"] ?: decision.params["package_name"] ?: "app"}"
-                                "type_text" -> "Typing text"
-                                "tap_text" -> "Selecting ${decision.params["query"] ?: "item"}"
-                                "tap_index" -> "Selecting element"
-                                "tap_xy" -> "Tapping on screen"
-                                "scroll", "swipe" -> "Scrolling"
-                                "done" -> "Completing task"
-                                else -> decision.thought.take(28)
-                            }
-                            com.example.service.AuraForegroundService.currentService?.liveClient?.sendTextMessage(
-                                "[SYSTEM EVENT: Step $step of $maxSteps: $stepNote. Speak a 2-3 word update: '$stepNote'.]"
-                            )
-                        }
-
-                        // 7. Execute decided action
-                        var executionResultMsg = "Done"
-                        var screenSig = nodes.take(4).joinToString { it.text + it.bounds }
-
-                        when (decision.action) {
-                            "tap_index" -> {
-                                val idx = (decision.params["index"] as? Number)?.toInt() ?: 1
-                                val targetNode = nodes.find { it.index == idx }
-                                if (targetNode != null) {
-                                    inputController.tap(targetNode.centerX.toFloat(), targetNode.centerY.toFloat(), "Tap #${targetNode.index}")
-                                    executionResultMsg = "Tapped node #$idx (${targetNode.text})"
-                                } else {
-                                    executionResultMsg = "Node #$idx not found"
-                                }
-                            }
-                            "tap_text" -> {
-                                val query = decision.params["query"]?.toString() ?: ""
-                                val targetNode = nodes.find {
-                                    it.text.contains(query, ignoreCase = true) ||
-                                    it.contentDescription.contains(query, ignoreCase = true)
-                                }
-                                if (targetNode != null) {
-                                    inputController.tap(targetNode.centerX.toFloat(), targetNode.centerY.toFloat(), "Tap $query")
-                                    executionResultMsg = "Tapped '$query' at (${targetNode.centerX}, ${targetNode.centerY})"
-                                } else {
-                                    executionResultMsg = "Text '$query' not found"
-                                }
-                            }
-                            "tap_xy" -> {
-                                val x = (decision.params["x"] as? Number)?.toFloat() ?: 540f
-                                val y = (decision.params["y"] as? Number)?.toFloat() ?: 1200f
-                                inputController.tap(x, y, "Tap ($x, $y)")
-                                executionResultMsg = "Tapped ($x, $y)"
-                            }
-                            "long_press" -> {
-                                val x = (decision.params["x"] as? Number)?.toFloat() ?: 540f
-                                val y = (decision.params["y"] as? Number)?.toFloat() ?: 1200f
-                                inputController.longPress(x, y, 1000L, "Long press")
-                                executionResultMsg = "Long pressed ($x, $y)"
-                            }
-                            "type_text" -> {
-                                val text = decision.params["text"]?.toString() ?: ""
-                                val res = typeTextTool.execute(mapOf("text" to text))
-                                executionResultMsg = res.output
-                            }
-                            "scroll" -> {
-                                val dir = decision.params["direction"]?.toString() ?: "down"
-                                scrollTool.execute(mapOf("direction" to dir))
-                                executionResultMsg = "Scrolled $dir"
-                            }
-                            "swipe" -> {
-                                val x1 = (decision.params["x1"] as? Number)?.toFloat() ?: 540f
-                                val y1 = (decision.params["y1"] as? Number)?.toFloat() ?: 1800f
-                                val x2 = (decision.params["x2"] as? Number)?.toFloat() ?: 540f
-                                val y2 = (decision.params["y2"] as? Number)?.toFloat() ?: 600f
-                                inputController.swipe(x1, y1, x2, y2, 300L, "Swipe")
-                                executionResultMsg = "Swiped ($x1, $y1) to ($x2, $y2)"
-                            }
-                            "back" -> {
-                                inputController.pressKey(4, "Back")
-                                executionResultMsg = "Pressed back"
-                            }
-                            "home" -> {
-                                inputController.pressKey(3, "Home")
-                                executionResultMsg = "Pressed home"
-                            }
-                            "recents" -> {
-                                inputController.pressKey(187, "Recents")
-                                executionResultMsg = "Opened recents"
-                            }
-                            "open_app" -> {
-                                val pkg = decision.params["package_name"]?.toString()
-                                    ?: decision.params["app_name"]?.toString() ?: ""
-                                val launched = appInventory.openApp(pkg)
-                                executionResultMsg = if (launched) "Opened $pkg" else "Could not open $pkg"
-                            }
-                            "wait" -> {
-                                val ms = (decision.params["ms"] as? Number)?.toLong() ?: 1000L
-                                delay(ms)
-                                executionResultMsg = "Waited ${ms}ms"
-                            }
-                            "ask_user" -> {
-                                val q = decision.params["question"]?.toString() ?: "Need input"
-                                taskOutcome = q
-                                taskSuccess = true
-                                return@coroutineScope
-                            }
-                            "done" -> {
-                                val summary = decision.params["summary"]?.toString() ?: "Task complete."
-                                taskOutcome = summary
-                                taskSuccess = true
-                                return@coroutineScope
-                            }
-                            "fail" -> {
-                                val summary = decision.params["summary"]?.toString() ?: "Cannot complete task."
-                                taskOutcome = summary
-                                taskSuccess = false
-                                return@coroutineScope
-                            }
-                            else -> {
-                                executionResultMsg = "Unrecognized action: ${decision.action}"
-                            }
-                        }
-
-                        history.add(
-                            AgentActionHistory(
-                                stepIndex = step,
-                                action = "${decision.action}: ${decision.thought}",
-                                target = decision.params.toString(),
-                                result = executionResultMsg,
-                                screenSignature = screenSig
-                            )
-                        )
-
-                        delay(600L) // Wait for action to take effect
-                    }
-
-                    taskOutcome = "Task reached maximum step limit ($maxSteps) without full completion."
-                    taskSuccess = false
-                }
-            } catch (ce: CancellationException) {
-                taskOutcome = "Task was cancelled."
-                taskSuccess = false
-            } catch (e: Exception) {
-                Log.e(TAG, "Autonomous task execution error", e)
-                taskOutcome = "Error executing task: ${e.message}"
-                taskSuccess = false
-            } finally {
-                activeTaskJob = null
-                val duration = System.currentTimeMillis() - startTime
-
-                try {
-                    memoryRepository.logTask(
-                        TaskExecutionEntity(
-                            taskId = taskId,
-                            goal = goal,
-                            stepsJson = stepsJsonArray.toString(),
-                            outcome = taskOutcome,
-                            success = taskSuccess,
-                            durationMs = duration
-                        )
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed logging task execution to Room", e)
-                }
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val tm = com.example.core.agent.TaskManager.getInstance(context)
+            val taskId = args["task_id"]?.toString()
+            val task = if (taskId.isNullOrBlank()) tm.getLatestTask() else tm.getTask(taskId)
+            return if (task != null) {
+                val statusDesc = "Task ${task.taskId}: Status=${task.status}, Step=${task.currentStep}/${task.maxSteps}, Goal='${task.goal}', Result='${task.result ?: "in progress"}'"
+                ToolExecutionResult(true, statusDesc)
+            } else {
+                ToolExecutionResult(false, "No task found matching ID: $taskId")
             }
+        }
+    }
 
-            return ToolExecutionResult(taskSuccess, taskOutcome)
+    val cancelTaskTool = object : Tool {
+        override val name = "cancel_task"
+        override val description = "Cancels a running background screen automation task."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "task_id" to mapOf("type" to "string", "description" to "The ID of the task to cancel.")
+            ),
+            "required" to listOf("task_id")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val taskId = args["task_id"]?.toString() ?: return ToolExecutionResult(false, "Missing task_id")
+            val tm = com.example.core.agent.TaskManager.getInstance(context)
+            val cancelled = tm.cancelTask(taskId)
+            return ToolExecutionResult(cancelled, if (cancelled) "Task $taskId cancelled successfully" else "Could not find active task $taskId")
         }
     }
 
     fun getAllTools(): List<Tool> = listOf(
         readScreenTool, tapElementTool, tapXyTool, longPressTool, swipeTool,
-        scrollTool, typeTextTool, typeAndSendMessageTool, pressKeyTool, waitTool, findOnScreenTool, runTaskTool
+        scrollTool, typeTextTool, typeAndSendMessageTool, pressKeyTool, waitTool, findOnScreenTool,
+        runTaskTool, startTaskTool, taskStatusTool, cancelTaskTool
     )
 }

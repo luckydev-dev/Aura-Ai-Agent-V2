@@ -207,6 +207,32 @@ class PermissionDoctor(
             )
         )
 
+        // 10. Default Phone Assistant
+        val isDefaultAssist = isDefaultAssistant()
+        items.add(
+            PermissionCheckItem(
+                id = "DEFAULT_ASSISTANT",
+                title = "Default Phone Assistant",
+                description = "Enables launch via long-press power / swipe from corner gestures.",
+                isGranted = isDefaultAssist,
+                isCritical = false,
+                fixAction = { fixDefaultAssistant() }
+            )
+        )
+
+        // 11. Call Screening Role
+        val isScreeningGranted = isCallScreeningRoleHeld()
+        items.add(
+            PermissionCheckItem(
+                id = "CALL_SCREENING",
+                title = "Call Screening Role",
+                description = "Allows Aura to screen and auto-reject spam and unwanted calls instantly.",
+                isGranted = isScreeningGranted,
+                isCritical = false,
+                fixAction = { fixCallScreeningRole() }
+            )
+        )
+
         items
     }
 
@@ -241,6 +267,40 @@ class PermissionDoctor(
         rootManager.execute("settings put secure enabled_notification_listeners $newNotifs")
         delay(600)
         return isNotificationListenerRunning()
+    }
+
+    fun isDefaultAssistant(): Boolean {
+        val assist = Settings.Secure.getString(context.contentResolver, "assistant") ?: ""
+        val voice = Settings.Secure.getString(context.contentResolver, "voice_interaction_service") ?: ""
+        return assist.contains(context.packageName) || voice.contains(context.packageName)
+    }
+
+    suspend fun fixDefaultAssistant(): Boolean = withContext(Dispatchers.IO) {
+        val pkg = context.packageName
+        val assistSvc = "$pkg/com.example.service.AuraVoiceInteractionService"
+        rootManager.execute("settings put secure assistant \"$assistSvc\"")
+        rootManager.execute("settings put secure voice_interaction_service \"$assistSvc\"")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            rootManager.execute("cmd role add-role-holder android.app.role.ASSISTANT $pkg")
+        }
+        delay(300)
+        isDefaultAssistant()
+    }
+
+    fun isCallScreeningRoleHeld(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = context.getSystemService(android.app.role.RoleManager::class.java)
+            rm?.isRoleHeld(android.app.role.RoleManager.ROLE_CALL_SCREENING) == true
+        } else true
+    }
+
+    suspend fun fixCallScreeningRole(): Boolean = withContext(Dispatchers.IO) {
+        val pkg = context.packageName
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            rootManager.execute("cmd role add-role-holder android.app.role.CALL_SCREENING $pkg")
+        }
+        delay(300)
+        isCallScreeningRoleHeld()
     }
 
     /**
@@ -387,7 +447,11 @@ class PermissionDoctor(
             // 5. Notification listener
             fixNotificationListener()
 
-            // 6. OEM background fixes
+            // 6. Default Assistant & Call Screening
+            fixDefaultAssistant()
+            fixCallScreeningRole()
+
+            // 7. OEM background fixes
             applyOemFixes()
 
             _lastReport.value = "All permissions granted & services enabled via Root"

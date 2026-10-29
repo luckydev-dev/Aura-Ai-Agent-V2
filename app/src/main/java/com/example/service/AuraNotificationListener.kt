@@ -100,9 +100,14 @@ class AuraNotificationListener : NotificationListenerService() {
         sbn ?: return
         cacheSbn(sbn)
         checkVoipIncomingCall(sbn)
+
+        // Route to AutoReplyCoordinator for independent chat auto-replies
+        val prefs = com.example.core.settings.AuraPreferences(this)
+        com.example.core.messaging.AutoReplyCoordinator.getInstance(this, prefs).handleNotification(sbn)
+
+        // Route to NotificationAnnouncementManager for voice announcements
         val manager = com.example.core.telephony.NotificationAnnouncementManager.instance
-            ?: com.example.core.telephony.NotificationAnnouncementManager(this, com.example.core.settings.AuraPreferences(this))
-        manager.processNotification(sbn)
+        manager?.processNotification(sbn)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
@@ -113,35 +118,43 @@ class AuraNotificationListener : NotificationListenerService() {
     private fun checkVoipIncomingCall(sbn: StatusBarNotification) {
         try {
             val notif = sbn.notification ?: return
-            val extras = notif.extras ?: return
-            val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
-            val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-            val category = notif.category
+            val pkg = sbn.packageName?.lowercase(java.util.Locale.ROOT) ?: ""
 
-            val isCallCategory = category == Notification.CATEGORY_CALL
-            val isCallText = text.contains("incoming", ignoreCase = true) ||
-                    text.contains("calling", ignoreCase = true) ||
-                    title.contains("incoming call", ignoreCase = true)
+            // Strictly ignore cellular dialer/telecom/incallui packages
+            if (pkg.contains("dialer") || pkg.contains("telecom") || pkg.contains("incallui") || pkg.contains("phone")) {
+                return
+            }
 
-            if (isCallCategory || isCallText) {
-                val pkg = sbn.packageName ?: ""
+            // Treat as VoIP call ONLY when category is CATEGORY_CALL AND has answer/decline actions or fullScreenIntent
+            val isCallCategory = notif.category == Notification.CATEGORY_CALL
+            val hasActions = notif.actions != null && notif.actions.any { action ->
+                val title = action.title?.toString()?.lowercase(java.util.Locale.ROOT) ?: ""
+                title.contains("answer") || title.contains("accept") || title.contains("decline") ||
+                        title.contains("reject") || title.contains("उठाएं") || title.contains("काटें")
+            }
+            val hasFullScreen = notif.fullScreenIntent != null
+
+            if (isCallCategory && (hasActions || hasFullScreen)) {
+                val extras = notif.extras ?: return
+                val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+                val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+
                 val appLabel = when {
                     pkg.contains("whatsapp") -> "WhatsApp"
                     pkg.contains("telegram") -> "Telegram"
-                    pkg.contains("dialer") || pkg.contains("telecom") || pkg.contains("incallui") -> "Phone"
                     else -> {
                         try {
                             val pm = packageManager
                             val ai = pm.getApplicationInfo(pkg, 0)
                             pm.getApplicationLabel(ai).toString()
                         } catch (e: Exception) {
-                            "Phone"
+                            "VoIP Call"
                         }
                     }
                 }
                 var caller = if (title.isNotBlank() && !title.contains("call", ignoreCase = true)) {
                     title
-                } else if (text.isNotBlank() && !text.contains("call", ignoreCase = true) && !text.contains("calling", ignoreCase = true) && !text.contains("incoming", ignoreCase = true)) {
+                } else if (text.isNotBlank() && !text.contains("call", ignoreCase = true)) {
                     text
                 } else {
                     title.ifBlank { text }
@@ -149,6 +162,7 @@ class AuraNotificationListener : NotificationListenerService() {
                 caller = caller.replace(Regex("""(?i)^(whatsapp\s+call\s+from\s+|incoming\s+call\s+from\s+|call\s+from\s+)"""), "").trim()
                 if (caller.isBlank()) caller = "Unknown"
 
+                Log.i(TAG, "AuraNotificationListener: Confirmed VoIP incoming call notification from $appLabel ($caller)")
                 CallAnnouncementManager.instance?.onVoipCallDetected(appLabel, caller)
             }
         } catch (e: Exception) {

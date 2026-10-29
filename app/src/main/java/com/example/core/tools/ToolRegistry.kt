@@ -206,12 +206,11 @@ class ToolRegistry(
             )
         )
 
-        // Per-tool timeout definition
-        val timeoutMs = when {
-            name in listOf("read_screen", "tap_element", "type_text", "swipe", "perform_agent_task") -> 90_000L
-            name in listOf("run_shell", "reboot", "shutdown") -> 30_000L
-            else -> 15_000L
-        }
+        // Activity heartbeat for silence watchdog
+        com.example.service.AuraForegroundService.currentService?.liveClient?.markActivityExternal()
+
+        // Per-tool timeout definition from Tool interface
+        val timeoutMs = tool.timeoutMs
 
         // Progress emission if tool runs longer than 8s
         val progressJob = launch {
@@ -241,9 +240,10 @@ class ToolRegistry(
             ToolExecutionResult(false, "Tool execution failed: ${e.message}")
         } finally {
             progressJob.cancel()
+            com.example.service.AuraForegroundService.currentService?.liveClient?.markActivityExternal()
         }
 
-        // If execution failed or encountered a permission error, invoke PermissionDoctor
+        // If execution failed or encountered a permission error, invoke PermissionDoctor if retryable
         val isPermissionSuspect = !result.success && (
                 result.output.contains("permission", ignoreCase = true) ||
                         result.output.contains("denied", ignoreCase = true) ||
@@ -251,7 +251,7 @@ class ToolRegistry(
                         result.output.contains("disabled", ignoreCase = true)
                 )
 
-        if (!result.success || isPermissionSuspect) {
+        if (tool.retryable && (!result.success || isPermissionSuspect)) {
             val diagnosis = permissionDoctor.diagnoseAndAutoFix(name, args, result.output)
             if (diagnosis.anyFixed) {
                 // Auto-fixed! Retry the tool ONCE automatically

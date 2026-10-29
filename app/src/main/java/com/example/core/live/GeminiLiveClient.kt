@@ -167,6 +167,12 @@ class GeminiLiveClient(
             while (isActive) {
                 delay(3000L)
                 if (_connectionState.value == LiveConnectionState.Connected && isSetupComplete) {
+                    val isTaskRunning = com.example.core.agent.TaskManager.getInstanceOrNull()?.isAnyTaskRunning() == true
+                    if (isTaskRunning) {
+                        lastActivityTimestamp = System.currentTimeMillis()
+                        continue
+                    }
+
                     val idleMs = System.currentTimeMillis() - lastActivityTimestamp
 
                     // 1. Short silence auto-hangup if configured (e.g. 30s)
@@ -190,6 +196,10 @@ class GeminiLiveClient(
                 }
             }
         }
+    }
+
+    fun markActivityExternal() {
+        markActivity()
     }
 
     fun onScreenStateChanged(isScreenOn: Boolean) {
